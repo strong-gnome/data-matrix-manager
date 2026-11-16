@@ -140,7 +140,7 @@ Everything is kept under `/data` (`./data` on the host when you use Docker):
 ```
 data/
 ├── barcodes.db            # SQLite database (WAL mode)
-├── original_batches/      # uploaded source files, renamed to <batch_id>.pdf (or .eps)
+├── original_batches/      # uploaded source files, renamed to <batch_id>.pdf
 ├── barcode_images/<id>/   # cropped PNG of each detected code
 ├── to_print/<id>/         # <batch_id>_print.pdf
 └── to_reprint/<id>/       # <batch_id>_reprint.pdf (replaced on each reprint)
@@ -168,7 +168,7 @@ The UI uses these JSON endpoints, and you can call them yourself.
 
 | Method | Path                               | Description |
 |--------|------------------------------------|-------------|
-| POST   | `/api/upload`                      | Multipart `file` (`.pdf` or `.eps`, max 50 MB). Starts background processing and returns `batch_id`. |
+| POST   | `/api/upload`                      | Multipart `file` (`.pdf` only, max 50 MB). Starts background processing and returns `batch_id`. |
 | GET    | `/api/upload_progress/<batch_id>`  | `status`, `total_pages`, `pages_done`, `decoded`, `failed` |
 | GET    | `/api/batches`                     | All batches, newest first |
 | GET    | `/api/barcodes/<batch_id>`         | All barcodes in a batch |

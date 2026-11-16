@@ -458,8 +458,9 @@ def api_upload():
     if not f:
         return jsonify(error="No file provided"), 400
     ext = Path(f.filename).suffix.lower()
-    if ext not in (".pdf", ".eps"):
-        return jsonify(error="Only PDF/EPS files accepted"), 400
+    # Only PDF: pages are rendered with poppler, which cannot read EPS.
+    if ext != ".pdf":
+        return jsonify(error="Only PDF files accepted"), 400
     # Reserve a batch number from a counter that only ever increases, so
     # numbers are never reused after a batch is deleted. BEGIN IMMEDIATE
     # takes the write lock up front, so parallel uploads get distinct numbers.
