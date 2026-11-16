@@ -1,0 +1,12 @@
+services:
+  barcode:
+    image: barcode-mgr
+    container_name: barcode-mgr
+    ports:
+      - "5321:5000"
+    volumes:
+      - ./app:/app
+      - ./data:/data
+    restart: unless-stopped
+    mem_limit: 1000m
+    memswap_limit: 1000m
