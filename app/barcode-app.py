@@ -555,7 +555,7 @@ def api_batches():
 @app.route("/api/barcodes/<batch_id>")
 def api_barcodes(batch_id):
     with get_db() as db:
-        rows = db.execute("SELECT * FROM barcodes WHERE batch_id=? ORDER BY id", (batch_id,)).fetchall()
+        rows = db.execute("SELECT * FROM barcodes WHERE batch_id=? ORDER BY seq_num", (batch_id,)).fetchall()
     return jsonify([dict(r) for r in rows])
 
 
