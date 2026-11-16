@@ -909,6 +909,14 @@ var dark = localStorage.getItem("dark_" + pageKey) === "1";
 
 function t(key) { return (TRANSLATIONS[lang] && TRANSLATIONS[lang][key]) || key; }
 
+// Escape any value from the server or user input before putting it into
+// innerHTML, so it is always shown as text and never parsed as HTML.
+function escHtml(v) {
+  return String(v === null || v === undefined ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 function applyLang() {
   document.querySelectorAll("[data-i18n]").forEach(function(el) {
     el.textContent = t(el.getAttribute("data-i18n"));
@@ -969,20 +977,17 @@ function displayStatus(s) {
 }
 
 function renderTable() {
-    function escHtml(s) {
-        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    }
     var hide = document.getElementById("hideScanned").checked;
     var html = "";
     for (var i = 0; i < currentBarcodes.length; i++) {
         var b = currentBarcodes[i];
         if (hide && b.status === "scanned") continue;
         var st = displayStatus(b.status);
-        html += "<tr><td><strong>" + (b.seq_num || "") + "</strong></td>";
-        html += '<td><img class="barcode-thumb" src="/api/barcode_image/' + b.id + '"></td>';
-        html += "<td>" + b.id + "</td>";
+        html += "<tr><td><strong>" + escHtml(b.seq_num || "") + "</strong></td>";
+        html += '<td><img class="barcode-thumb" src="/api/barcode_image/' + encodeURIComponent(b.id) + '"></td>';
+        html += "<td>" + escHtml(b.id) + "</td>";
         html += '<td class="decoded">' + escHtml(b.decoded || "") + "</td>";
-        html += '<td class="status-' + b.status + '">' + st + "</td></tr>";
+        html += '<td class="status-' + escHtml(b.status) + '">' + escHtml(st) + "</td></tr>";
     }
     document.getElementById("detail-table").innerHTML = html;
 }
@@ -998,7 +1003,7 @@ function setUploadProgress(done, total) {
 function pollUploadProgress(batchId) {
     if (uploadPollTimer) clearInterval(uploadPollTimer);
     uploadPollTimer = setInterval(function() {
-        fetch("/api/upload_progress/" + batchId).then(function(r) { return r.json(); }).then(function(d) {
+        fetch("/api/upload_progress/" + encodeURIComponent(batchId)).then(function(r) { return r.json(); }).then(function(d) {
             setUploadProgress(d.pages_done, d.total_pages);
             if (d.status === "processed" || d.status === "error") {
                 clearInterval(uploadPollTimer);
@@ -1006,7 +1011,7 @@ function pollUploadProgress(batchId) {
                 document.getElementById("btnUpload").disabled = false;
                 if (d.status === "error") {
                     document.getElementById("upload-status").innerHTML =
-                        '<div class="flash flash-err">' + t("upload_failed") + '</div>';
+                        '<div class="flash flash-err">' + escHtml(t("upload_failed")) + '</div>';
                 } else {
                     document.getElementById("upload-status").innerHTML =
                         '<div class="flash flash-ok">Batch ' + batchId + ": " + d.decoded + " decoded, " + d.failed + " failed</div>";
@@ -1050,15 +1055,16 @@ function loadBatches() {
         html += '<th></th></tr></thead><tbody>';
         for (var i = 0; i < batches.length; i++) {
             var b = batches[i];
-            html += "<tr><td>" + b.id + "</td>";
-            html += "<td style='word-break:break-all;white-space:normal'>" + b.filename + "</td>";
-            html += "<td>" + b.status + "</td>";
-            html += "<td>" + b.created_at.slice(0, 16) + "</td>";
+            var id = escHtml(b.id);
+            html += "<tr><td>" + id + "</td>";
+            html += "<td style='word-break:break-all;white-space:normal'>" + escHtml(b.filename) + "</td>";
+            html += "<td>" + escHtml(b.status) + "</td>";
+            html += "<td>" + escHtml((b.created_at || "").slice(0, 16)) + "</td>";
             html += "<td>";
             html += "<td style='white-space:nowrap'>";
-            html += '<button data-action="view" data-id="' + b.id + '">' + t("btn_view") + '</button>';
-            html += '<button data-action="complete" data-id="' + b.id + '" class="btn-success">' + t("btn_complete") + '</button>';
-            html += '<button data-action="delete" data-id="' + b.id + '" class="btn-danger">' + t("btn_delete") + '</button>';
+            html += '<button data-action="view" data-id="' + id + '">' + escHtml(t("btn_view")) + '</button>';
+            html += '<button data-action="complete" data-id="' + id + '" class="btn-success">' + escHtml(t("btn_complete")) + '</button>';
+            html += '<button data-action="delete" data-id="' + id + '" class="btn-danger">' + escHtml(t("btn_delete")) + '</button>';
             html += "</td></tr>";
         }
         html += "</tbody></table>";
@@ -1080,9 +1086,8 @@ function loadBatch(bid) {
         }
         var statsHtml = "";
         for (var s in counts) {
-            statsHtml += '<div class="stat"><div class="num">' + counts[s] + '</div><div class="label">' + s + "</div></div>";
+            statsHtml += '<div class="stat"><div class="num">' + counts[s] + '</div><div class="label">' + escHtml(s) + "</div></div>";
         }
-        
         document.getElementById("detail-stats").innerHTML = statsHtml;
         renderTable();
     });
@@ -1096,8 +1101,8 @@ function saveToPdf() {
     }).then(function(r) { return r.json(); }).then(function(d) {
         var box = document.getElementById("print-result");
         if (d.folder) {
-            box.innerHTML = '<div class="flash flash-ok">' + t("saved_to") + ' <code>' + d.folder + '</code>' +
-                (d.pdf_url ? ' &nbsp;<a href="' + d.pdf_url + '" target="_blank">' + t("open_pdf") + '</a>' : '') +
+            box.innerHTML = '<div class="flash flash-ok">' + escHtml(t("saved_to")) + ' <code>' + escHtml(d.folder) + '</code>' +
+                (d.pdf_url ? ' &nbsp;<a href="' + escHtml(d.pdf_url) + '" target="_blank">' + escHtml(t("open_pdf")) + '</a>' : '') +
                 '</div>';
         } else {
             box.innerHTML = '<div class="flash flash-err">' + t("nothing_to_print") + '</div>';
@@ -1117,7 +1122,7 @@ function doReconcile() {
         }
         var statsHtml = "";
         for (var s in counts) {
-            statsHtml += '<div class="stat"><div class="num">' + counts[s] + '</div><div class="label">' + s + "</div></div>";
+            statsHtml += '<div class="stat"><div class="num">' + counts[s] + '</div><div class="label">' + escHtml(s) + "</div></div>";
         }
         document.getElementById("detail-stats").innerHTML = statsHtml;
         renderTable();
@@ -1139,8 +1144,8 @@ function reprintMissed() {
     }).then(function(r) { return r.json(); }).then(function(d) {
         var box = document.getElementById("print-result");
         if (d.folder) {
-            box.innerHTML = '<div class="flash flash-ok">' + t("reprint_saved_to") + ' <code>' + d.folder + '</code>' +
-                (d.pdf_url ? ' &nbsp;<a href="' + d.pdf_url + '" target="_blank">' + t("open_pdf") + '</a>' : '') +
+            box.innerHTML = '<div class="flash flash-ok">' + escHtml(t("reprint_saved_to")) + ' <code>' + escHtml(d.folder) + '</code>' +
+                (d.pdf_url ? ' &nbsp;<a href="' + escHtml(d.pdf_url) + '" target="_blank">' + escHtml(t("open_pdf")) + '</a>' : '') +
                 '</div>';
         } else {
             box.innerHTML = '<div class="flash flash-err">' + t("nothing_to_print") + '</div>';
@@ -1203,14 +1208,16 @@ var scanLog = [];
 function loadBatchList() {
     fetch("/api/batches").then(function(r) { return r.json(); }).then(function(all) {
         var sel = document.getElementById("batchSelect");
-        sel.innerHTML = '<option value="">' + t("select_placeholder") + '</option>';
+        var html = '<option value="">' + escHtml(t("select_placeholder")) + '</option>';
         for (var i = 0; i < all.length; i++) {
             var b = all[i];
             if (b.status !== "processed") continue;
-            var name = b.filename.length > 30 ? b.filename.slice(0, 30) + "..." : b.filename;
-            var date = b.created_at.slice(0, 16).replace("T", " ");
-            sel.innerHTML += '<option value="' + b.id + '">' + b.id + " - " + name + " - " + date + "</option>";
+            var fname = b.filename || "";
+            var name = fname.length > 30 ? fname.slice(0, 30) + "..." : fname;
+            var date = (b.created_at || "").slice(0, 16).replace("T", " ");
+            html += '<option value="' + escHtml(b.id) + '">' + escHtml(b.id + " - " + name + " - " + date) + "</option>";
         }
+        sel.innerHTML = html;
     });
 }
 
@@ -1236,11 +1243,11 @@ function submitScan() {
         var cls = d.status === "ok" ? "flash-ok" : "flash-err";
         var errMsg = d.status === "unknown" ? t("err_not_found") : d.message;
         var msg = d.status === "ok" ? ("OK " + time + " - " + val.slice(0, 40)) : ("WARN " + time + " - " + errMsg);
-        scanLog.unshift('<div class="flash ' + cls + '">' + msg + "</div>");
+        scanLog.unshift('<div class="flash ' + cls + '">' + escHtml(msg) + "</div>");
         document.getElementById("scan-log").innerHTML = scanLog.join("");
-        var feedback = '<div class="flash ' + cls + '">' + msg + "</div>";
+        var feedback = '<div class="flash ' + cls + '">' + escHtml(msg) + "</div>";
         if (d.batch_completed) {
-            feedback += '<div class="flash flash-ok">' + t("batch_auto_completed") + "</div>";
+            feedback += '<div class="flash flash-ok">' + escHtml(t("batch_auto_completed")) + "</div>";
         }
         document.getElementById("scan-feedback").innerHTML = feedback;
         inp.value = "";
@@ -1254,9 +1261,6 @@ function submitScan() {
 }
 
 function reconcileB() {
-    function escHtml(s) {
-        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    }
     if (!batchId) return;
     fetch("/api/reconcile/" + batchId).then(function(r) { return r.json(); }).then(function(d) {
         var html = '<div class="stats">';
@@ -1270,7 +1274,7 @@ function reconcileB() {
             html += "<thead><tr><th>" + t("col_num") + "</th><th>ID</th><th>" + t("col_decoded") + "</th></tr></thead><tbody>";
             for (var i = 0; i < d.missed.length; i++) {
                 var b = d.missed[i];
-                html += "<tr><td><strong>" + (b.seq_num || "") + "</strong></td><td>" + b.id + "</td><td style='word-break:break-all;white-space:normal'>" + escHtml(b.decoded || "") + "</td></tr>";
+                html += "<tr><td><strong>" + escHtml(b.seq_num || "") + "</strong></td><td>" + escHtml(b.id) + "</td><td style='word-break:break-all;white-space:normal'>" + escHtml(b.decoded || "") + "</td></tr>";
             }
             html += "</tbody></table>";
         } else {
