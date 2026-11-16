@@ -38,8 +38,8 @@ Both pages have an English/Russian switch and a dark mode.
 ```
 
 - **Resolution.** Codes are not upscaled one by one. Each PDF page is rasterised at 400 DPI as a whole, and every code is cropped from that image with a small margin. So the stored PNGs, and the labels printed from them, are 400 DPI crops of the vector source.
-- **Processing runs in the background.** Uploads return right away. Pages are rendered and decoded one at a time, so memory stays flat even for big PDFs, and the printer station shows a progress bar while this runs.
-- **Detection.** First, each whole page goes to libdmtx, which finds the codes itself, up to 25 per page. If that finds nothing, the app falls back to an OpenCV contour search. That search takes out table lines, keeps roughly square shapes, and sizes its filters from the median shape on that page, not from fixed limits.
+- **Processing runs in the background.** Uploads return right away. Four pages are rendered and decoded at the same time (`workers` in `config.ini`). Results are still saved in page order, memory depends on the number of workers rather than the PDF size, and the printer station shows a progress bar while this runs.
+- **Detection.** First, each whole page goes to libdmtx, which finds the codes itself, up to 25 per page. To keep this fast, libdmtx searches the page at 1/2 size, and only if that finds nothing does it search at full size. The codes are always cropped from the full 400 DPI image, so the search size doesn't affect label quality. If libdmtx finds nothing at all on a page, the app falls back to an OpenCV contour search. That search takes out table lines, keeps roughly square shapes, and sizes its filters from the median shape on that page, not from fixed limits.
 - **Duplicate check.** When processing finishes, the app looks for codes that appear more than once in the batch, or that already exist in another batch, including completed ones. Honest Sign codes must be unique per product, so the printer station then shows an orange warning on the upload result and in the batch list, naming the other batches. This is a warning only: the batch can still be printed, so check it before printing. A code that appears twice in one batch can still be scanned twice, once for each copy.
 - **Cleaning the decoded text.** GS (`\x1D`) separators and other control characters are removed, and repeated spaces are merged into one. This happens to the decoded values and to scanner input, so the two match when compared. Many handheld scanners drop or change the GS characters in Honest Sign codes, which is why both sides are cleaned. This only affects matching. The printed label uses the cropped image of the original code, not a re-encoded one, so the GS separators and the crypto tail stay intact on the label.
 
@@ -119,7 +119,7 @@ The data directory is hard-coded to `/data`, so it must exist and be writable by
 
 ## Configuration
 
-Label layout is set in [`app/config.ini`](app/config.ini). All values are in millimetres.
+Label layout and processing are set in [`app/config.ini`](app/config.ini). Label sizes are in millimetres.
 
 ```ini
 [barcode]
@@ -127,6 +127,9 @@ source_barcode_size_mm = 10   # size of the codes in the source PDF (not used ye
 print_barcode_size_mm  = 20   # size of the code on the printed label
 print_paper_size_mm    = 25   # side of the square label / PDF page
 seq_num_gap_mm         = 1.5  # gap between the code and the sequence number under it
+
+[processing]
+workers = 4                   # PDF pages processed at the same time (~50 MB each for A4)
 ```
 
 The code is centred on the label. The batch sequence number is printed under it in bold, with the font size scaled to `seq_num_gap_mm`. Restart the app after you change the config.

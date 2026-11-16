@@ -9,6 +9,7 @@ import os, io, json, sqlite3, logging, time, shutil, re, configparser, threading
 from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -51,6 +52,11 @@ PRINT_BARCODE_SIZE_MM  = float(_s.get("print_barcode_size_mm",  15))
 PRINT_PAPER_SIZE_MM    = float(_s.get("print_paper_size_mm",    25))
 # Gap between sequence number and barcode
 SEQ_NUM_GAP_MM = float(_s.get("seq_num_gap_mm", 2.0))
+
+_p = _cfg["processing"] if "processing" in _cfg else {}
+# Pages rendered and searched at the same time. Each page in progress holds
+# its 400 DPI image (~50 MB for A4), so keep this modest under mem_limit.
+PROCESS_WORKERS = max(1, min(int(_p.get("workers", 4)), os.cpu_count() or 1))
 
 DATA_DIR.mkdir(exist_ok=True)
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -297,7 +303,13 @@ def decode_datamatrix(img, timeout_ms=3000):
     return None
 
 
-def find_barcodes_in_page(page_img, timeout_ms=3000, pad=10, max_count=25):
+# Order in which libdmtx searches a page: at 1/2 size first (like 200 DPI),
+# then full size. The second step only runs if the first found nothing.
+SCAN_SHRINKS = (2, 1)
+
+
+def find_barcodes_in_page(page_img, timeout_ms=3000, pad=10, max_count=25,
+                          shrinks=SCAN_SHRINKS, contour_fallback=True):
     """
     Locate *and* decode every Data Matrix symbol on a page.
 
@@ -313,6 +325,16 @@ def find_barcodes_in_page(page_img, timeout_ms=3000, pad=10, max_count=25):
     covers ~22% of the page rather than the old max of 8%) had every real
     candidate discarded before decoding was even attempted.
 
+    Speed: libdmtx keeps searching for more symbols after the last one until
+    the whole page is searched or the timeout hits, which dominates the time
+    per page. The page is searched at 1/2 size first (see SCAN_SHRINKS),
+    which finishes small label pages in ~0.3 s instead of 3 s; large A4
+    pages still take up to the timeout, so _process_batch also works on
+    several pages in parallel. Coordinates come back in full-size pixels and
+    the crop is taken from the full 400 DPI page, so labels are unchanged.
+    If the shrunk search finds nothing (e.g. very small codes), the page is
+    searched again at full size.
+
     Fallback: if the full-page scan finds nothing (can happen on a very
     busy/noisy page), fall back to the old contour-based candidate search,
     now with dynamically-derived area bounds (see
@@ -320,13 +342,19 @@ def find_barcodes_in_page(page_img, timeout_ms=3000, pad=10, max_count=25):
     """
     h_page, w_page = page_img.shape[:2]
     gray = cv2.cvtColor(page_img, cv2.COLOR_BGR2GRAY) if len(page_img.shape) == 3 else page_img
+    pil_gray = Image.fromarray(gray)
 
     found = []
-    try:
-        results = dmtx_decode(Image.fromarray(gray), timeout=timeout_ms, max_count=max_count)
-    except Exception as e:
-        log.warning("  Full-page dmtx scan failed (%s)", e)
-        results = []
+    results = []
+    for shrink in shrinks:
+        try:
+            results = dmtx_decode(pil_gray, timeout=timeout_ms, max_count=max_count, shrink=shrink)
+        except Exception as e:
+            log.warning("  Full-page dmtx scan (shrink=%d) failed (%s)", shrink, e)
+            results = []
+        if results:
+            break
+        log.info("  dmtx scan at shrink=%d found nothing", shrink)
 
     for r in results:
         left, top, w, h = r.rect.left, r.rect.top, r.rect.width, r.rect.height
@@ -336,20 +364,20 @@ def find_barcodes_in_page(page_img, timeout_ms=3000, pad=10, max_count=25):
         x1 = min(w_page, left + w + pad)
         y0 = max(0, h_page - top - h - pad)
         y1 = min(h_page, h_page - top + pad)
-        region = page_img[y0:y1, x0:x1]
+        # copy(): a slice would keep the whole page image alive in memory.
+        region = page_img[y0:y1, x0:x1].copy()
         try:
             decoded = r.data.decode("utf-8")
         except UnicodeDecodeError:
             decoded = r.data.decode("latin-1")
         found.append((region, _sanitize(decoded)))
 
-    if found:
-        log.info("  Full-page dmtx scan: %d barcode(s) found directly", len(found))
+    if found or not contour_fallback:
         return found
 
     log.info("  Full-page dmtx scan found nothing — falling back to contour search")
     regions = extract_barcode_regions_dynamic(page_img)
-    return [(region, decode_datamatrix(region, timeout_ms=timeout_ms)) for region in regions]
+    return [(region.copy(), decode_datamatrix(region, timeout_ms=timeout_ms)) for region in regions]
 
 
 # ---------------------------------------------------------------------------
@@ -410,9 +438,10 @@ class _BatchDeleted(Exception):
 
 def process_batch(batch_id, save_path):
     """
-    Runs in a background thread. Renders and decodes one page at a time,
-    updating batches.pages_done after each page so the frontend can poll
-    for progress. Keeps memory flat regardless of PDF size (see render_page).
+    Runs in a background thread. Renders and decodes PROCESS_WORKERS pages
+    at a time, writing results in page order and updating
+    batches.pages_done after each page so the frontend can poll for
+    progress. Memory is bounded by the number of workers, not the PDF size.
 
     Any unexpected failure marks the batch 'error' so it never stays stuck in
     'processing'. If the batch is deleted while running, processing stops.
@@ -427,6 +456,49 @@ def process_batch(batch_id, save_path):
             db.execute("UPDATE batches SET status='error' WHERE id=?", (batch_id,))
 
 
+def _scan_page(save_path, pi, shrinks=SCAN_SHRINKS, contour_fallback=True):
+    """
+    Render page pi (0-based) and search it. Runs in a worker thread: poppler
+    is a subprocess and libdmtx/OpenCV release the GIL, so pages really do
+    run in parallel. Returns a list of (crop, decoded) or None if the page
+    could not be rendered. Only the small crops are returned, so the full
+    page image is freed as soon as the worker is done with it.
+    """
+    try:
+        page = render_page(str(save_path), pi + 1)
+    except Exception as e:
+        log.error("Page %d: failed to render (%s) — skipping", pi + 1, e)
+        return None
+    if page is None:
+        return None
+    return find_barcodes_in_page(page, shrinks=shrinks, contour_fallback=contour_fallback)
+
+
+def _insert_codes(db, batch_id, pi, first_ri, found, seq):
+    """Write crops + rows for codes found on page pi; returns the last seq used."""
+    for ri, (region, decoded) in enumerate(found, start=first_ri):
+        seq += 1
+        bc_id = "%s-%02d-%03d" % (batch_id, pi, ri)
+        img_path = BARCODE_IMG_DIR / batch_id / (bc_id + ".png")
+        if not cv2.imwrite(str(img_path), region):
+            raise IOError("could not write %s" % img_path)
+        db.execute(
+            "INSERT INTO barcodes (id,batch_id,seq_num,decoded,img_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+            (bc_id, batch_id, seq, decoded, str(img_path),
+             "decoded" if decoded else "decode_failed", _utcnow()))
+    return seq
+
+
+def _lock_batch(db, batch_id):
+    """
+    Take the write lock and make sure the batch still exists, so a
+    concurrent delete can't leave orphaned rows or images behind.
+    """
+    db.execute("BEGIN IMMEDIATE")
+    if not db.execute("SELECT 1 FROM batches WHERE id=?", (batch_id,)).fetchone():
+        raise _BatchDeleted()
+
+
 def _process_batch(batch_id, save_path):
     try:
         page_count = get_page_count(str(save_path))
@@ -439,35 +511,25 @@ def _process_batch(batch_id, save_path):
     with get_db() as db:
         db.execute("UPDATE batches SET total_pages=? WHERE id=?", (page_count, batch_id))
 
+    # Pages are rendered and searched by PROCESS_WORKERS threads, but results
+    # are written strictly in page order, so sequence numbers and progress
+    # behave exactly as with one page at a time.
     seq = 0
-    for pi in range(page_count):
+    with ThreadPoolExecutor(max_workers=PROCESS_WORKERS) as pool:
+        futures = [pool.submit(_scan_page, save_path, pi) for pi in range(page_count)]
         try:
-            page = render_page(str(save_path), pi + 1)
-        except Exception as e:
-            log.error("Batch %s page %d: failed to render (%s) — skipping", batch_id, pi + 1, e)
-            page = None
-        found = find_barcodes_in_page(page) if page is not None else []
-        if page is not None:
-            log.info("Batch %s page %d: %d regions", batch_id, pi + 1, len(found))
-        with get_db() as db:
-            # Hold the write lock while checking the batch still exists and
-            # writing its rows/images, so a concurrent delete can't leave
-            # orphans behind.
-            db.execute("BEGIN IMMEDIATE")
-            if not db.execute("SELECT 1 FROM batches WHERE id=?", (batch_id,)).fetchone():
-                raise _BatchDeleted()
-            for ri, (region, decoded) in enumerate(found):
-                seq += 1
-                bc_id = "%s-%02d-%03d" % (batch_id, pi, ri)
-                img_path = BARCODE_IMG_DIR / batch_id / (bc_id + ".png")
-                if not cv2.imwrite(str(img_path), region):
-                    raise IOError("could not write %s" % img_path)
-                db.execute(
-                    "INSERT INTO barcodes (id,batch_id,seq_num,decoded,img_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
-                    (bc_id, batch_id, seq, decoded, str(img_path),
-                     "decoded" if decoded else "decode_failed", _utcnow()))
-            db.execute("UPDATE batches SET pages_done=? WHERE id=?", (pi + 1, batch_id))
-        del page, found
+            for pi, fut in enumerate(futures):
+                found = fut.result()
+                if found is not None:
+                    log.info("Batch %s page %d: %d regions", batch_id, pi + 1, len(found))
+                with get_db() as db:
+                    _lock_batch(db, batch_id)
+                    seq = _insert_codes(db, batch_id, pi, 0, found or [], seq)
+                    db.execute("UPDATE batches SET pages_done=? WHERE id=?", (pi + 1, batch_id))
+        except BaseException:
+            for f in futures:
+                f.cancel()
+            raise
 
     with get_db() as db:
         dup_in_batch, dup_other, dup_batches = find_duplicates(db, batch_id)
