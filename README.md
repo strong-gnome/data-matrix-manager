@@ -140,13 +140,15 @@ Everything is kept under `/data` (`./data` on the host when you use Docker):
 ```
 data/
 ├── barcodes.db            # SQLite database (WAL mode)
-├── original_batches/      # uploaded source files, renamed to <batch_id>.pdf
+├── original_batches/      # uploaded source files, as <batch_id>__<original name>.pdf
 ├── barcode_images/<id>/   # cropped PNG of each detected code
 ├── to_print/<id>/         # <batch_id>_print.pdf
 └── to_reprint/<id>/       # <batch_id>_reprint.pdf (replaced on each reprint)
 ```
 
 Batch IDs look like `batch_<n>_<YYYY-MM-DD>`. `<n>` comes from a counter in the database that only goes up, so a number is never used twice, even after its batch is deleted. Numbers can have gaps. Barcode IDs look like `<batch_id>-<page>-<index>`, where page and index both start at 0 and are zero-padded to 2 and 3 digits (for example, `batch_1_2026-11-16-00-000`).
+
+An uploaded file keeps its original name after the batch ID, for example `batch_7_2026-11-16__Гель-скраб для тела очищающий_48.pdf`. The batch ID keeps names unique. The original name is cleaned before it's used: Cyrillic and other letters stay, characters that aren't allowed in file names are replaced with `_`, and it's cut to 80 characters. The exact original name is still stored in the database and shown in the UI. Batches uploaded before this change keep their old `<batch_id>.pdf` name.
 
 Deleting a batch in the UI removes its database rows, images, generated PDFs and the uploaded source file. If the batch is still processing, processing stops.
 

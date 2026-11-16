@@ -5,7 +5,7 @@ Docker:  docker build -t barcode-mgr . && docker compose up -d
 Manual:  pip install -r requirements.txt && python barcode-app.py
 """
 
-import os, io, json, sqlite3, logging, time, shutil, re, configparser, threading
+import os, io, json, sqlite3, logging, time, shutil, re, configparser, threading, unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import contextmanager
@@ -135,6 +135,10 @@ def init_db():
             db.execute("ALTER TABLE batches ADD COLUMN dup_other INTEGER DEFAULT 0")
         if "dup_batches" not in cols:
             db.execute("ALTER TABLE batches ADD COLUMN dup_batches TEXT")
+        if "source_file" not in cols:
+            # Name of the stored upload in original_batches/. NULL for batches
+            # uploaded before this column existed (stored as <batch_id>.pdf).
+            db.execute("ALTER TABLE batches ADD COLUMN source_file TEXT")
         # A batch still 'processing' at startup was cut off by a restart or
         # crash; its background thread is gone, so it would never finish.
         stuck = db.execute("UPDATE batches SET status='error' WHERE status='processing'").rowcount
@@ -481,6 +485,28 @@ def too_large(_e):
     return jsonify(error="File is too large (max 50 MB)"), 413
 
 
+_UNSAFE_NAME_CHARS = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
+
+
+def _safe_name_part(filename, max_len=80):
+    """
+    Turn the browser-supplied file name into a safe piece of a file name:
+    keep letters of any script (Cyrillic included), digits, spaces and
+    ordinary punctuation; drop any directory part, characters that are not
+    allowed in file names, and the extension. Returns "" if nothing is left.
+    """
+    name = unicodedata.normalize("NFC", filename or "")
+    name = re.split(r"[\\/]", name)[-1]          # no directory parts
+    name = Path(name).stem
+    name = _UNSAFE_NAME_CHARS.sub("_", name)
+    name = re.sub(r"\s+", " ", name).strip(" ._")
+    return name[:max_len].rstrip(" ._")
+
+
+def _source_path(batch_id, source_file):
+    return UPLOAD_DIR / (source_file or (batch_id + ".pdf"))
+
+
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
     f = request.files.get("file")
@@ -502,13 +528,17 @@ def api_upload():
             batch_id = "batch_%d_%s" % (batch_num, batch_date)
             if not db.execute("SELECT 1 FROM batches WHERE id=?", (batch_id,)).fetchone():
                 break
+        # Stored as <batch_id>__<original name>.pdf: the batch ID keeps the
+        # name unique, the original name makes the file recognisable on disk.
+        part = _safe_name_part(f.filename)
+        source_file = "%s__%s%s" % (batch_id, part, ext) if part else batch_id + ext
         db.execute(
-            "INSERT INTO batches (id,filename,created_at,status,total_pages,pages_done) VALUES (?,?,?,?,?,?)",
-            (batch_id, f.filename, _utcnow(), "processing", 0, 0))
+            "INSERT INTO batches (id,filename,created_at,status,total_pages,pages_done,source_file) VALUES (?,?,?,?,?,?,?)",
+            (batch_id, f.filename, _utcnow(), "processing", 0, 0, source_file))
 
     # Write files only after the ID is safely reserved, so an existing
     # batch's source file can never be overwritten.
-    save_path = UPLOAD_DIR / (batch_id + ext)
+    save_path = UPLOAD_DIR / source_file
     try:
         f.save(save_path)
         (BARCODE_IMG_DIR / batch_id).mkdir(exist_ok=True)
@@ -721,6 +751,7 @@ def api_delete_batch(batch_id):
     with get_db() as db:
         if not _batch_exists(db, batch_id):
             return jsonify(error="Batch not found"), 404
+        source_file = db.execute("SELECT source_file FROM batches WHERE id=?", (batch_id,)).fetchone()["source_file"]
         rows = db.execute("SELECT img_path FROM barcodes WHERE batch_id=?", (batch_id,)).fetchall()
         for row in rows:
             if row["img_path"]:
@@ -733,8 +764,12 @@ def api_delete_batch(batch_id):
     for d in (BARCODE_IMG_DIR / batch_id, TO_PRINT_DIR / batch_id, TO_REPRINT_DIR / batch_id):
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
-    for ext in (".pdf", ".eps"):
-        (UPLOAD_DIR / (batch_id + ext)).unlink(missing_ok=True)
+    src = _source_path(batch_id, source_file)
+    # source_file was built by the app, but make sure it stays in UPLOAD_DIR.
+    if src.resolve().parent == UPLOAD_DIR.resolve():
+        src.unlink(missing_ok=True)
+    # Older batches may have been stored as <batch_id>.eps.
+    (UPLOAD_DIR / (batch_id + ".eps")).unlink(missing_ok=True)
     return jsonify(status="ok")
 
 
