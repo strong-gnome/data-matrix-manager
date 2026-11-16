@@ -1203,7 +1203,6 @@ function loadBatches() {
             html += "<td style='word-break:break-all;white-space:normal'>" + escHtml(b.filename) + dupWarning(b) + "</td>";
             html += "<td>" + escHtml(b.status) + "</td>";
             html += "<td>" + escHtml((b.created_at || "").slice(0, 16)) + "</td>";
-            html += "<td>";
             html += "<td style='white-space:nowrap'>";
             html += '<button data-action="view" data-id="' + id + '">' + escHtml(t("btn_view")) + '</button>';
             html += '<button data-action="complete" data-id="' + id + '" class="btn-success">' + escHtml(t("btn_complete")) + '</button>';
