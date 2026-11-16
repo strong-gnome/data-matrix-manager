@@ -184,7 +184,9 @@ The UI uses these JSON endpoints, and you can call them yourself.
 
 ## Security note
 
-The app has **no authentication**, and it runs Flask's development server with `debug=True` on `0.0.0.0`. Run it only on a trusted local network, and don't expose it to the internet.
+The app has **no authentication**, and it runs Flask's development server on `0.0.0.0`. Run it only on a trusted local network, and don't expose it to the internet.
+
+Flask debug mode is **off** by default, because its in-browser debugger can run code on the server. To turn it on for local development only, set `FLASK_DEBUG=1`.
 
 ## License
 

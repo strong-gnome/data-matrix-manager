@@ -1463,4 +1463,6 @@ if __name__ == "__main__":
     log.info("Starting Barcode Management Server...")
     log.info("Printer Station: http://localhost:5000/printer-station")
     log.info("Scanner Station: http://<this-ip>:5000/scanner-station")
-    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
+    # Werkzeug's debugger allows running code from the browser, so it is off
+    # unless FLASK_DEBUG=1 is set explicitly.
+    app.run(host="0.0.0.0", port=5000, debug=os.environ.get("FLASK_DEBUG") == "1", threaded=True)
