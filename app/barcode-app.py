@@ -1095,12 +1095,6 @@ document.addEventListener("DOMContentLoaded", function() {
     localStorage.setItem("dark_" + pageKey, dark ? "1" : "0");
     applyDark();
   });
-
-  document.getElementById("langToggle").addEventListener("change", function() {
-    lang = this.checked ? "ru" : "en";
-    localStorage.setItem("lang_" + pageKey, lang);
-    applyLang();
-  });
 });
 """
 
