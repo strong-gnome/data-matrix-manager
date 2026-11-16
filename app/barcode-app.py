@@ -91,6 +91,7 @@ def get_db():
 
 
 _BATCH_ID_RE = re.compile(r"^batch_(\d+)_")
+_BATCH_ID_FULL_RE = re.compile(r"^batch_\d+_\d{4}-\d{2}-\d{2}$")
 
 
 def init_db():
@@ -128,6 +129,16 @@ def init_db():
             db.execute("ALTER TABLE batches ADD COLUMN total_pages INTEGER DEFAULT 0")
         if "pages_done" not in existing_cols:
             db.execute("ALTER TABLE batches ADD COLUMN pages_done INTEGER DEFAULT 0")
+
+
+def _valid_batch_id(batch_id):
+    """Batch IDs are used in file paths, so only accept the generated format."""
+    return isinstance(batch_id, str) and _BATCH_ID_FULL_RE.match(batch_id) is not None
+
+
+def _batch_exists(db, batch_id):
+    return _valid_batch_id(batch_id) and db.execute(
+        "SELECT 1 FROM batches WHERE id=?", (batch_id,)).fetchone() is not None
 
 
 def _json_body():
@@ -498,6 +509,8 @@ def api_print():
     if bc_ids != "all" and not (isinstance(bc_ids, list) and all(isinstance(i, str) for i in bc_ids)):
         return jsonify(error="barcode_ids must be \"all\" or a list of IDs"), 400
     with get_db() as db:
+        if not _batch_exists(db, batch_id):
+            return jsonify(error="Batch not found"), 404
         if bc_ids == "all":
             rows = db.execute("SELECT * FROM barcodes WHERE batch_id=? AND decoded IS NOT NULL ORDER BY seq_num", (batch_id,)).fetchall()
         else:
@@ -524,6 +537,8 @@ def api_print():
 
 @app.route("/api/print_pdf/<batch_id>")
 def api_print_pdf(batch_id):
+    if not _valid_batch_id(batch_id):
+        return "Not found", 404
     out_path = TO_PRINT_DIR / batch_id / ("%s_print.pdf" % batch_id)
     if not out_path.exists():
         return "Not found", 404
@@ -577,11 +592,13 @@ def api_reconcile(batch_id):
 @app.route("/api/reprint", methods=["POST"])
 def api_reprint():
     batch_id = _json_body().get("batch_id")
-    reprint_batch_dir = TO_REPRINT_DIR / batch_id
-    if reprint_batch_dir.exists():
-        shutil.rmtree(reprint_batch_dir, ignore_errors=True)
-    reprint_batch_dir.mkdir(exist_ok=True)
     with get_db() as db:
+        if not _batch_exists(db, batch_id):
+            return jsonify(error="Batch not found"), 404
+        reprint_batch_dir = TO_REPRINT_DIR / batch_id
+        if reprint_batch_dir.exists():
+            shutil.rmtree(reprint_batch_dir, ignore_errors=True)
+        reprint_batch_dir.mkdir(exist_ok=True)
         rows = db.execute(
             "SELECT * FROM barcodes WHERE batch_id=? AND status!='scanned' AND decoded IS NOT NULL ORDER BY seq_num",
             (batch_id,)).fetchall()
@@ -604,6 +621,8 @@ def api_reprint():
 
 @app.route("/api/reprint_pdf/<batch_id>")
 def api_reprint_pdf(batch_id):
+    if not _valid_batch_id(batch_id):
+        return "Not found", 404
     out_path = TO_REPRINT_DIR / batch_id / ("%s_reprint.pdf" % batch_id)
     if not out_path.exists():
         return "Not found", 404
@@ -613,13 +632,19 @@ def api_reprint_pdf(batch_id):
 @app.route("/api/batch/<batch_id>/complete", methods=["POST"])
 def api_complete_batch(batch_id):
     with get_db() as db:
+        if not _batch_exists(db, batch_id):
+            return jsonify(error="Batch not found"), 404
         db.execute("UPDATE batches SET status='completed' WHERE id=?", (batch_id,))
     return jsonify(status="ok")
 
 
 @app.route("/api/batch/<batch_id>", methods=["DELETE"])
 def api_delete_batch(batch_id):
+    # batch_id goes into rmtree paths: reject anything that isn't a real,
+    # well-formed batch ID (e.g. "..", which would point at /data itself).
     with get_db() as db:
+        if not _batch_exists(db, batch_id):
+            return jsonify(error="Batch not found"), 404
         rows = db.execute("SELECT img_path FROM barcodes WHERE batch_id=?", (batch_id,)).fetchall()
         for row in rows:
             if row["img_path"]:
