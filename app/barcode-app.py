@@ -501,7 +501,22 @@ def api_scan():
             return jsonify(status="unknown", message="Barcode not found in this batch")
         db.execute("UPDATE barcodes SET status='scanned', scanned_at=? WHERE id=?",
                    (_utcnow(), row["id"]))
-    return jsonify(status="ok", barcode_id=row["id"], decoded=scanned)
+        # Auto-complete the batch once every barcode has been scanned.
+        # decode_failed rows have no decoded value and can never be scanned,
+        # so a batch that has any is left for the operator to complete manually.
+        left = db.execute(
+            "SELECT COUNT(*) AS n FROM barcodes WHERE batch_id=? AND status!='scanned'",
+            (batch_id,)).fetchone()["n"]
+        batch_completed = False
+        if left == 0:
+            cur = db.execute(
+                "UPDATE batches SET status='completed' WHERE id=? AND status='processed'",
+                (batch_id,))
+            batch_completed = cur.rowcount > 0
+            if batch_completed:
+                log.info("Batch %s: all barcodes scanned — marked completed", batch_id)
+    return jsonify(status="ok", barcode_id=row["id"], decoded=scanned,
+                   batch_completed=batch_completed)
 
 
 @app.route("/api/reconcile/<batch_id>")
@@ -812,6 +827,7 @@ var TRANSLATIONS = {
     status_to_be_scanned: "To be scanned",
     lbl_missing: "Missing (not scanned):",
     all_scanned: "All barcodes scanned!",
+    batch_auto_completed: "All barcodes scanned — batch marked as completed.",
     processing: "Processing...",
     pages_label: "pages", upload_failed: "Upload failed — could not read the PDF",
     saved_to: "Saved to:", open_pdf: "Open PDF", reprint_saved_to: "Reprint saved to:",
@@ -843,6 +859,7 @@ var TRANSLATIONS = {
     status_to_be_scanned: "Ожидает сканирования",
     lbl_missing: "Пропущенные (не отсканированы):",
     all_scanned: "Все штрихкоды отсканированы!",
+    batch_auto_completed: "Все штрихкоды отсканированы — партия отмечена завершённой.",
     processing: "Обработка...",
     pages_label: "стр.", upload_failed: "Ошибка загрузки — не удалось прочитать PDF",
     saved_to: "Сохранено в:", open_pdf: "Открыть PDF", reprint_saved_to: "Файл для допечати сохранён в:",
@@ -1189,10 +1206,18 @@ function submitScan() {
         var msg = d.status === "ok" ? ("OK " + time + " - " + val.slice(0, 40)) : ("WARN " + time + " - " + errMsg);
         scanLog.unshift('<div class="flash ' + cls + '">' + msg + "</div>");
         document.getElementById("scan-log").innerHTML = scanLog.join("");
-        document.getElementById("scan-feedback").innerHTML = '<div class="flash ' + cls + '">' + msg + "</div>";
+        var feedback = '<div class="flash ' + cls + '">' + msg + "</div>";
+        if (d.batch_completed) {
+            feedback += '<div class="flash flash-ok">' + t("batch_auto_completed") + "</div>";
+        }
+        document.getElementById("scan-feedback").innerHTML = feedback;
         inp.value = "";
         inp.focus();
         refreshStats();
+        if (d.batch_completed) {
+            // Batch drops out of the list; keep batchId so stats stay visible.
+            loadBatchList();
+        }
     });
 }
 
