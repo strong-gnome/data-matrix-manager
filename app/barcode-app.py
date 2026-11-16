@@ -513,9 +513,13 @@ def api_print():
             return jsonify(error="Batch not found"), 404
         if bc_ids == "all":
             rows = db.execute("SELECT * FROM barcodes WHERE batch_id=? AND decoded IS NOT NULL ORDER BY seq_num", (batch_id,)).fetchall()
-        else:
+        elif bc_ids:
             ph = ",".join("?" * len(bc_ids))
-            rows = db.execute("SELECT * FROM barcodes WHERE id IN (%s) ORDER BY seq_num" % ph, bc_ids).fetchall()
+            rows = db.execute(
+                "SELECT * FROM barcodes WHERE batch_id=? AND decoded IS NOT NULL AND id IN (%s) ORDER BY seq_num" % ph,
+                [batch_id] + bc_ids).fetchall()
+        else:
+            rows = []
         rows = [dict(r) for r in rows]
         saved = 0
         folder = pdf_url = None
@@ -528,8 +532,9 @@ def api_print():
                 saved = len(rows)
                 folder = str(out_dir.resolve())
                 pdf_url = url_for("api_print_pdf", batch_id=batch_id)
+                # Never move an already-scanned code back to 'printed'.
                 for row in rows:
-                    db.execute("UPDATE barcodes SET status='printed' WHERE id=?", (row["id"],))
+                    db.execute("UPDATE barcodes SET status='printed' WHERE id=? AND status!='scanned'", (row["id"],))
             except Exception as e:
                 log.error("PDF save failed: %s", e)
     return jsonify(printed=saved, total=len(rows), folder=folder, pdf_url=pdf_url)
