@@ -123,12 +123,18 @@ def init_db():
                 max_num = max(max_num, int(m.group(1)))
         db.execute("INSERT OR IGNORE INTO counters (name, value) VALUES ('batch', 0)")
         db.execute("UPDATE counters SET value=MAX(value, ?) WHERE name='batch'", (max_num,))
-        # Migrate DBs created before total_pages/pages_done existed.
-        existing_cols = {r["name"] for r in db.execute("PRAGMA table_info(batches)").fetchall()}
-        if "total_pages" not in existing_cols:
+        # Migrate DBs created before these columns existed.
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(batches)").fetchall()}
+        if "total_pages" not in cols:
             db.execute("ALTER TABLE batches ADD COLUMN total_pages INTEGER DEFAULT 0")
-        if "pages_done" not in existing_cols:
+        if "pages_done" not in cols:
             db.execute("ALTER TABLE batches ADD COLUMN pages_done INTEGER DEFAULT 0")
+        if "dup_in_batch" not in cols:
+            db.execute("ALTER TABLE batches ADD COLUMN dup_in_batch INTEGER DEFAULT 0")
+        if "dup_other" not in cols:
+            db.execute("ALTER TABLE batches ADD COLUMN dup_other INTEGER DEFAULT 0")
+        if "dup_batches" not in cols:
+            db.execute("ALTER TABLE batches ADD COLUMN dup_batches TEXT")
 
 
 def _valid_batch_id(batch_id):
@@ -143,6 +149,28 @@ def _batch_exists(db, batch_id):
 
 def _json_body():
     return request.get_json(silent=True) or {}
+
+
+def find_duplicates(db, batch_id):
+    """
+    Count codes in this batch that appear more than once in it, or that also
+    exist in another batch. Honest Sign codes must be unique per product, so
+    either case means the same code could end up on two products.
+    """
+    dup_in_batch = db.execute(
+        "SELECT COALESCE(SUM(n - 1), 0) AS extra FROM ("
+        "  SELECT COUNT(*) AS n FROM barcodes WHERE batch_id=? AND decoded IS NOT NULL"
+        "  GROUP BY decoded HAVING COUNT(*) > 1)", (batch_id,)).fetchone()["extra"]
+    rows = db.execute(
+        "SELECT b2.batch_id AS other, COUNT(DISTINCT b1.decoded) AS n "
+        "FROM barcodes b1 JOIN barcodes b2 ON b2.decoded = b1.decoded AND b2.batch_id != b1.batch_id "
+        "WHERE b1.batch_id=? AND b1.decoded IS NOT NULL GROUP BY b2.batch_id ORDER BY b2.batch_id",
+        (batch_id,)).fetchall()
+    dup_other = db.execute(
+        "SELECT COUNT(DISTINCT b1.decoded) AS n FROM barcodes b1 "
+        "JOIN barcodes b2 ON b2.decoded = b1.decoded AND b2.batch_id != b1.batch_id "
+        "WHERE b1.batch_id=? AND b1.decoded IS NOT NULL", (batch_id,)).fetchone()["n"]
+    return dup_in_batch, dup_other, ",".join(r["other"] for r in rows) or None
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +437,13 @@ def process_batch(batch_id, save_path):
             db.execute("UPDATE batches SET pages_done=? WHERE id=?", (pi + 1, batch_id))
 
     with get_db() as db:
-        db.execute("UPDATE batches SET status='processed' WHERE id=?", (batch_id,))
+        dup_in_batch, dup_other, dup_batches = find_duplicates(db, batch_id)
+        db.execute(
+            "UPDATE batches SET status='processed', dup_in_batch=?, dup_other=?, dup_batches=? WHERE id=?",
+            (dup_in_batch, dup_other, dup_batches, batch_id))
+    if dup_in_batch or dup_other:
+        log.warning("Batch %s: %d repeated code(s) within batch, %d code(s) also in %s",
+                    batch_id, dup_in_batch, dup_other, dup_batches)
     log.info("Batch %s: processing complete (%d pages)", batch_id, page_count)
 
 
@@ -475,6 +509,9 @@ def api_upload_progress(batch_id):
         pages_done=batch["pages_done"] or 0,
         decoded=counts["decoded"] or 0,
         failed=counts["failed"] or 0,
+        dup_in_batch=batch["dup_in_batch"] or 0,
+        dup_other=batch["dup_other"] or 0,
+        dup_batches=batch["dup_batches"],
     )
 
 
@@ -559,8 +596,12 @@ def api_scan():
     if not scanned:
         return jsonify(error="Empty scan"), 400
     with get_db() as db:
-        row = db.execute("SELECT * FROM barcodes WHERE batch_id=? AND decoded=?",
-                         (batch_id, scanned)).fetchone()
+        # Prefer a copy not scanned yet, so a code that appears twice in the
+        # batch can still have every copy marked.
+        row = db.execute(
+            "SELECT * FROM barcodes WHERE batch_id=? AND decoded=? "
+            "ORDER BY CASE WHEN status='scanned' THEN 1 ELSE 0 END, seq_num LIMIT 1",
+            (batch_id, scanned)).fetchone()
         if not row:
             return jsonify(status="unknown", message="Barcode not found in this batch")
         db.execute("UPDATE barcodes SET status='scanned', scanned_at=? WHERE id=?",
@@ -681,6 +722,7 @@ COMMON_CSS = """
   --stat-num: #0f3460; --btn-bg: #0f3460; --btn-hover: #16213e;
   --flash-ok-bg: #d5f5e3; --flash-ok-text: #1e8449;
   --flash-err-bg: #fadbd8; --flash-err-text: #922b21;
+  --flash-warn-bg: #fdebd0; --flash-warn-text: #9a4a00;
   --shadow: rgba(0,0,0,0.1);
 }
 body.dark {
@@ -691,6 +733,7 @@ body.dark {
   --stat-num: #7eb8f7; --btn-bg: #0f3460; --btn-hover: #1a4a80;
   --flash-ok-bg: #1a3a2a; --flash-ok-text: #4caf80;
   --flash-err-bg: #3a1a1a; --flash-err-text: #e57373;
+  --flash-warn-bg: #3a2a12; --flash-warn-text: #f0a04b;
   --shadow: rgba(0,0,0,0.4);
 }
 
@@ -738,6 +781,7 @@ td.decoded { white-space: normal; word-break: break-all; overflow: visible; }
 .flash { padding: 12px; border-radius: 6px; margin: 8px 0; }
 .flash-ok { background: var(--flash-ok-bg); color: var(--flash-ok-text); }
 .flash-err { background: var(--flash-err-bg); color: var(--flash-err-text); }
+.flash-warn { background: var(--flash-warn-bg); color: var(--flash-warn-text); }
 .barcode-thumb { width: 60px; height: 60px; object-fit: contain; }
 #scan-log { max-height: 400px; overflow-y: auto; }
 .progress-bar { width: 100%; height: 16px; background: var(--th-bg); border-radius: 8px;
@@ -911,6 +955,10 @@ var TRANSLATIONS = {
     btn_view: "View", btn_complete: "Complete", btn_delete: "Delete",
     err_not_found: "Barcode not found in this batch",
     err_network: "Server not reachable — try again",
+    upload_done: "{id}: {decoded} decoded, {failed} failed",
+    dup_in_batch: "{n} code(s) appear more than once in this batch",
+    dup_other: "{n} code(s) already exist in: {batches}",
+    dup_title: "Duplicate codes — check before printing",
   },
   ru: {
     title_a: "Станция печати", title_b: "Станция сканирования",
@@ -944,6 +992,10 @@ var TRANSLATIONS = {
     btn_view: "Показать партию", btn_complete: "Отметить завершенной", btn_delete: "Удалить партию",
     err_not_found: "Штрихкод не найден в этой партии",
     err_network: "Сервер недоступен — повторите",
+    upload_done: "{id}: декодировано {decoded}, ошибок {failed}",
+    dup_in_batch: "Кодов, повторяющихся в этой партии: {n}",
+    dup_other: "Кодов, уже существующих в других партиях: {n} ({batches})",
+    dup_title: "Повторяющиеся коды — проверьте перед печатью",
   }
 };
 
@@ -951,7 +1003,13 @@ var pageKey = window.location.pathname.replace(/\//g, "_");
 var lang = localStorage.getItem("lang_" + pageKey) || "en";
 var dark = localStorage.getItem("dark_" + pageKey) === "1";
 
-function t(key) { return (TRANSLATIONS[lang] && TRANSLATIONS[lang][key]) || key; }
+function t(key, vars) {
+  var s = (TRANSLATIONS[lang] && TRANSLATIONS[lang][key]) || key;
+  if (vars) {
+    for (var k in vars) s = s.split("{" + k + "}").join(String(vars[k]));
+  }
+  return s;
+}
 
 // Escape any value from the server or user input before putting it into
 // innerHTML, so it is always shown as text and never parsed as HTML.
@@ -959,6 +1017,15 @@ function escHtml(v) {
   return String(v === null || v === undefined ? "" : v)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// Duplicate-code warning for a batch, as HTML ("" if none).
+function dupWarning(b) {
+  var parts = [];
+  if (b.dup_in_batch) parts.push(escHtml(t("dup_in_batch", {n: b.dup_in_batch})));
+  if (b.dup_other) parts.push(escHtml(t("dup_other", {n: b.dup_other, batches: (b.dup_batches || "").split(",").join(", ")})));
+  if (!parts.length) return "";
+  return '<div class="flash flash-warn"><strong>' + escHtml(t("dup_title")) + "</strong><br>" + parts.join("<br>") + "</div>";
 }
 
 function applyLang() {
@@ -1058,7 +1125,9 @@ function pollUploadProgress(batchId) {
                         '<div class="flash flash-err">' + escHtml(t("upload_failed")) + '</div>';
                 } else {
                     document.getElementById("upload-status").innerHTML =
-                        '<div class="flash flash-ok">Batch ' + batchId + ": " + d.decoded + " decoded, " + d.failed + " failed</div>";
+                        '<div class="flash flash-ok">' +
+                        escHtml(t("upload_done", {id: batchId, decoded: d.decoded, failed: d.failed})) + "</div>" +
+                        dupWarning(d);
                 }
                 setTimeout(function() {
                     document.getElementById("upload-progress-wrap").style.display = "none";
@@ -1101,7 +1170,7 @@ function loadBatches() {
             var b = batches[i];
             var id = escHtml(b.id);
             html += "<tr><td>" + id + "</td>";
-            html += "<td style='word-break:break-all;white-space:normal'>" + escHtml(b.filename) + "</td>";
+            html += "<td style='word-break:break-all;white-space:normal'>" + escHtml(b.filename) + dupWarning(b) + "</td>";
             html += "<td>" + escHtml(b.status) + "</td>";
             html += "<td>" + escHtml((b.created_at || "").slice(0, 16)) + "</td>";
             html += "<td>";
