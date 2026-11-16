@@ -121,7 +121,7 @@ data/
 └── to_reprint/<id>/       # <batch_id>_reprint.pdf (replaced on each reprint)
 ```
 
-Batch IDs look like `batch_<n>_<YYYY-MM-DD>`. Barcode IDs look like `<batch_id>-<page>-<index>`, where page and index both start at 0 and are zero-padded to 2 and 3 digits (for example, `batch_1_2026-11-16-00-000`).
+Batch IDs look like `batch_<n>_<YYYY-MM-DD>`. `<n>` comes from a counter in the database that only goes up, so a number is never used twice, even after its batch is deleted. Numbers can have gaps. Barcode IDs look like `<batch_id>-<page>-<index>`, where page and index both start at 0 and are zero-padded to 2 and 3 digits (for example, `batch_1_2026-11-16-00-000`).
 
 Deleting a batch in the UI removes its database rows, images, generated PDFs and the uploaded source file.
 

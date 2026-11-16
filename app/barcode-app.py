@@ -90,6 +90,9 @@ def get_db():
         conn.close()
 
 
+_BATCH_ID_RE = re.compile(r"^batch_(\d+)_")
+
+
 def init_db():
     with get_db() as db:
         db.executescript("""
@@ -106,7 +109,19 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_bc_batch ON barcodes(batch_id);
             CREATE INDEX IF NOT EXISTS idx_bc_decoded ON barcodes(decoded);
+            CREATE TABLE IF NOT EXISTS counters (
+                name TEXT PRIMARY KEY, value INTEGER NOT NULL
+            );
         """)
+        # Seed the batch counter from existing batch IDs so numbers keep
+        # increasing on DBs created before the counter existed.
+        max_num = 0
+        for r in db.execute("SELECT id FROM batches").fetchall():
+            m = _BATCH_ID_RE.match(r["id"])
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+        db.execute("INSERT OR IGNORE INTO counters (name, value) VALUES ('batch', 0)")
+        db.execute("UPDATE counters SET value=MAX(value, ?) WHERE name='batch'", (max_num,))
         # Migrate DBs created before total_pages/pages_done existed.
         existing_cols = {r["name"] for r in db.execute("PRAGMA table_info(batches)").fetchall()}
         if "total_pages" not in existing_cols:
@@ -391,17 +406,34 @@ def api_upload():
     ext = Path(f.filename).suffix.lower()
     if ext not in (".pdf", ".eps"):
         return jsonify(error="Only PDF/EPS files accepted"), 400
+    # Reserve a batch number from a counter that only ever increases, so
+    # numbers are never reused after a batch is deleted. BEGIN IMMEDIATE
+    # takes the write lock up front, so parallel uploads get distinct numbers.
+    batch_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with get_db() as db:
-        row = db.execute("SELECT COUNT(*) as cnt FROM batches").fetchone()
-        batch_num = row["cnt"] + 1
-        batch_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        batch_id = "batch_%d_%s" % (batch_num, batch_date)
-        save_path = UPLOAD_DIR / (batch_id + ext)
-        f.save(save_path)
-        (BARCODE_IMG_DIR / batch_id).mkdir(exist_ok=True)
+        db.execute("BEGIN IMMEDIATE")
+        while True:
+            db.execute("UPDATE counters SET value=value+1 WHERE name='batch'")
+            batch_num = db.execute("SELECT value FROM counters WHERE name='batch'").fetchone()["value"]
+            batch_id = "batch_%d_%s" % (batch_num, batch_date)
+            if not db.execute("SELECT 1 FROM batches WHERE id=?", (batch_id,)).fetchone():
+                break
         db.execute(
             "INSERT INTO batches (id,filename,created_at,status,total_pages,pages_done) VALUES (?,?,?,?,?,?)",
             (batch_id, f.filename, _utcnow(), "processing", 0, 0))
+
+    # Write files only after the ID is safely reserved, so an existing
+    # batch's source file can never be overwritten.
+    save_path = UPLOAD_DIR / (batch_id + ext)
+    try:
+        f.save(save_path)
+        (BARCODE_IMG_DIR / batch_id).mkdir(exist_ok=True)
+    except Exception as e:
+        log.error("Batch %s: failed to save upload (%s)", batch_id, e)
+        save_path.unlink(missing_ok=True)
+        with get_db() as db:
+            db.execute("DELETE FROM batches WHERE id=?", (batch_id,))
+        return jsonify(error="Failed to save uploaded file"), 500
     threading.Thread(target=process_batch, args=(batch_id, save_path), daemon=True).start()
     return jsonify(batch_id=batch_id, status="processing")
 
