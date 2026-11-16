@@ -135,6 +135,11 @@ def init_db():
             db.execute("ALTER TABLE batches ADD COLUMN dup_other INTEGER DEFAULT 0")
         if "dup_batches" not in cols:
             db.execute("ALTER TABLE batches ADD COLUMN dup_batches TEXT")
+        # A batch still 'processing' at startup was cut off by a restart or
+        # crash; its background thread is gone, so it would never finish.
+        stuck = db.execute("UPDATE batches SET status='error' WHERE status='processing'").rowcount
+        if stuck:
+            log.warning("Marked %d batch(es) interrupted during processing as 'error'", stuck)
 
 
 def _valid_batch_id(batch_id):
@@ -395,12 +400,30 @@ def save_barcodes_as_pdf(rows, output_path):
 # ---------------------------------------------------------------------------
 # API Routes
 # ---------------------------------------------------------------------------
+class _BatchDeleted(Exception):
+    pass
+
+
 def process_batch(batch_id, save_path):
     """
     Runs in a background thread. Renders and decodes one page at a time,
     updating batches.pages_done after each page so the frontend can poll
     for progress. Keeps memory flat regardless of PDF size (see render_page).
+
+    Any unexpected failure marks the batch 'error' so it never stays stuck in
+    'processing'. If the batch is deleted while running, processing stops.
     """
+    try:
+        _process_batch(batch_id, save_path)
+    except _BatchDeleted:
+        log.info("Batch %s: deleted during processing — stopped", batch_id)
+    except Exception:
+        log.exception("Batch %s: processing failed", batch_id)
+        with get_db() as db:
+            db.execute("UPDATE batches SET status='error' WHERE id=?", (batch_id,))
+
+
+def _process_batch(batch_id, save_path):
     try:
         page_count = get_page_count(str(save_path))
     except Exception as e:
@@ -419,22 +442,28 @@ def process_batch(batch_id, save_path):
         except Exception as e:
             log.error("Batch %s page %d: failed to render (%s) — skipping", batch_id, pi + 1, e)
             page = None
+        found = find_barcodes_in_page(page) if page is not None else []
         if page is not None:
-            found = find_barcodes_in_page(page)
             log.info("Batch %s page %d: %d regions", batch_id, pi + 1, len(found))
-            with get_db() as db:
-                for ri, (region, decoded) in enumerate(found):
-                    seq += 1
-                    bc_id = "%s-%02d-%03d" % (batch_id, pi, ri)
-                    img_path = BARCODE_IMG_DIR / batch_id / (bc_id + ".png")
-                    cv2.imwrite(str(img_path), region)
-                    db.execute(
-                        "INSERT INTO barcodes (id,batch_id,seq_num,decoded,img_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
-                        (bc_id, batch_id, seq, decoded, str(img_path),
-                         "decoded" if decoded else "decode_failed", _utcnow()))
-            del page, found
         with get_db() as db:
+            # Hold the write lock while checking the batch still exists and
+            # writing its rows/images, so a concurrent delete can't leave
+            # orphans behind.
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM batches WHERE id=?", (batch_id,)).fetchone():
+                raise _BatchDeleted()
+            for ri, (region, decoded) in enumerate(found):
+                seq += 1
+                bc_id = "%s-%02d-%03d" % (batch_id, pi, ri)
+                img_path = BARCODE_IMG_DIR / batch_id / (bc_id + ".png")
+                if not cv2.imwrite(str(img_path), region):
+                    raise IOError("could not write %s" % img_path)
+                db.execute(
+                    "INSERT INTO barcodes (id,batch_id,seq_num,decoded,img_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+                    (bc_id, batch_id, seq, decoded, str(img_path),
+                     "decoded" if decoded else "decode_failed", _utcnow()))
             db.execute("UPDATE batches SET pages_done=? WHERE id=?", (pi + 1, batch_id))
+        del page, found
 
     with get_db() as db:
         dup_in_batch, dup_other, dup_batches = find_duplicates(db, batch_id)

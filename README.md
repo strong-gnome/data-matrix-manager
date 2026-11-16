@@ -53,7 +53,7 @@ Both pages have an English/Russian switch and a dark mode.
 | `scanned`         | Matched by a scan at the scanner station             |
 | `reprinted`       | Included in a reprint PDF                            |
 
-A batch moves through `processing` → `processed` → `completed`. If the PDF can't be read, it gets `error`. The scanner station lists only `processed` batches, so a completed batch disappears from that list.
+A batch moves through `processing` → `processed` → `completed`. It gets `error` if the PDF can't be read, if processing fails partway, or if the app was restarted while the batch was still processing. The scanner station lists only `processed` batches, so a completed batch disappears from that list.
 
 A batch is marked `completed` **automatically** when the last of its barcodes is scanned. If any barcode is `decode_failed`, the batch can't be completed this way, because that code has no value to scan against. An operator then has to check it by hand and click **Complete** on the printer station.
 
