@@ -49,7 +49,7 @@ Both pages have an English/Russian switch and a dark mode.
 |-------------------|------------------------------------------------------|
 | `decoded`         | Found and decoded; shown as "To be scanned" in the UI |
 | `decode_failed`   | A code-like region was found but could not be decoded |
-| `printed`         | Included in a label PDF                              |
+| `printed`         | Included in a label PDF (a code already `scanned` keeps that status) |
 | `scanned`         | Matched by a scan at the scanner station             |
 | `reprinted`       | Included in a reprint PDF                            |
 
@@ -148,14 +148,14 @@ data/
 
 Batch IDs look like `batch_<n>_<YYYY-MM-DD>`. `<n>` comes from a counter in the database that only goes up, so a number is never used twice, even after its batch is deleted. Numbers can have gaps. Barcode IDs look like `<batch_id>-<page>-<index>`, where page and index both start at 0 and are zero-padded to 2 and 3 digits (for example, `batch_1_2026-11-16-00-000`).
 
-Deleting a batch in the UI removes its database rows, images, generated PDFs and the uploaded source file.
+Deleting a batch in the UI removes its database rows, images, generated PDFs and the uploaded source file. If the batch is still processing, processing stops.
 
 ## Typical workflow
 
-1. **Printer station: upload.** Upload the Data Matrix PDF from Honest Sign. The app renders each whole page at 400 DPI, finds every code on it, crops it from that page image, decodes it, removes the GS characters, numbers it within the batch and saves it to the database. Wait for the progress bar to finish.
+1. **Printer station: upload.** Upload the Data Matrix PDF from Honest Sign. The app renders each whole page at 400 DPI, finds every code on it, crops it from that page image, decodes it, removes the GS characters, numbers it within the batch and saves it to the database. Wait for the progress bar to finish. If an orange **duplicate codes** warning appears, find out why before printing. It means some codes repeat in this file or were already uploaded in another batch, and printing them again would put the same code on two products.
 2. **Printer station: print.** Open the batch with **View** and check the decoded values. Then click **Save to PDF file** and print the labels on the thermal printer. Each label has its sequence number printed under the code.
 3. **Scanner station: apply and scan.** Pick the batch, click into the scan field, and scan each label after it is applied to a product. Each scan is checked against the batch. A scanner that sends Enter after each code submits it automatically.
-4. **Printer station: reconcile.** Run **Reconcile** to see which codes have not been scanned yet. These are labels that were missed, damaged, or not applied. The scanner station shows the same list with **Check missing**.
+4. **Printer station: reconcile.** Click **Reconcile** to refresh the batch and see how many codes are scanned and how many are missing. Tick **Hide scanned** to list only the missing ones. These are labels that were missed, damaged, or not applied. At the scanner station, **Check missing** shows the same counts together with the list of missing codes.
 5. **Printer station: reprint.** Click **PDF file to reprint** to make a PDF of only the codes that have not been scanned, and print it.
 6. **Scanner station: rescan.** Apply the reprinted labels, or rescan labels that are already on products, so they are counted.
 7. Repeat steps 4–6 until every code is scanned. When the last one is scanned, the batch is marked **completed** automatically. The scanner station says so, and the batch leaves its list.
@@ -169,11 +169,11 @@ The UI uses these JSON endpoints, and you can call them yourself.
 | Method | Path                               | Description |
 |--------|------------------------------------|-------------|
 | POST   | `/api/upload`                      | Multipart `file` (`.pdf` only, max 50 MB). Starts background processing and returns `batch_id`. |
-| GET    | `/api/upload_progress/<batch_id>`  | `status`, `total_pages`, `pages_done`, `decoded`, `failed` |
-| GET    | `/api/batches`                     | All batches, newest first |
+| GET    | `/api/upload_progress/<batch_id>`  | `status`, `total_pages`, `pages_done`, `decoded`, `failed`, plus the duplicate counts `dup_in_batch`, `dup_other` and `dup_batches` (comma-separated IDs of the other batches) |
+| GET    | `/api/batches`                     | All batches, newest first, including their duplicate counts |
 | GET    | `/api/barcodes/<batch_id>`         | All barcodes in a batch |
 | GET    | `/api/barcode_image/<barcode_id>`  | Cropped PNG of one code |
-| POST   | `/api/print`                       | `{"batch_id", "barcode_ids": "all" \| [ids]}`: makes the label PDF and marks the codes `printed` |
+| POST   | `/api/print`                       | `{"batch_id", "barcode_ids": "all" \| [ids]}`: makes the label PDF from the batch's decoded codes and marks them `printed`. Codes already `scanned` stay `scanned` |
 | GET    | `/api/print_pdf/<batch_id>`        | Download the label PDF |
 | POST   | `/api/scan`                        | `{"batch_id", "decoded_string"}`: marks the matching code `scanned`. Returns `batch_completed: true` if that scan completed the batch |
 | GET    | `/api/reconcile/<batch_id>`        | Counts of total and scanned codes, plus the list of missed codes |
@@ -181,6 +181,8 @@ The UI uses these JSON endpoints, and you can call them yourself.
 | GET    | `/api/reprint_pdf/<batch_id>`      | Download the reprint PDF |
 | POST   | `/api/batch/<batch_id>/complete`   | Mark a batch completed |
 | DELETE | `/api/batch/<batch_id>`            | Delete a batch and all its files |
+
+Errors come back as JSON `{"error": "..."}`: 400 for invalid input (no file, not a PDF, empty scan, malformed `barcode_ids`), 404 for a missing, unknown or malformed batch ID, and 413 for an upload over 50 MB.
 
 ## Security note
 
