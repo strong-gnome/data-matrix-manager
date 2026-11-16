@@ -56,9 +56,24 @@ A batch moves through `processing` → `processed` → `completed`. If the PDF c
 
 A batch is marked `completed` **automatically** when the last of its barcodes is scanned. If any barcode is `decode_failed`, the batch can't be completed this way, because that code has no value to scan against. An operator then has to check it by hand and click **Complete** on the printer station.
 
+## Stack
+
+| Layer            | Technology |
+|------------------|------------|
+| Backend          | Python 3.12, Flask (single file: `app/barcode-app.py`) |
+| Database         | SQLite in WAL mode |
+| PDF rendering    | poppler via `pdf2image` |
+| Barcode decoding | libdmtx via `pylibdmtx`; OpenCV (`opencv-python-headless`) + NumPy for the fallback region search |
+| Images           | Pillow |
+| Label PDFs       | ReportLab |
+| Frontend         | Plain HTML, CSS and JavaScript, served by Flask (no build step, no frameworks) |
+| Deployment       | Docker (`python:3.12-slim`) + Docker Compose |
+
 ## Quick start (Docker)
 
 ```bash
+git clone https://github.com/strong-gnome/data-matrix-manager.git
+cd data-matrix-manager
 docker build -t barcode-mgr .
 docker compose up -d
 ```
@@ -76,6 +91,15 @@ The compose file:
 - mounts `./app` at `/app`, so code and `config.ini` changes take effect after a restart, without a rebuild
 - mounts `./data` at `/data`, where all state lives
 - limits the container to 1000 MB of memory
+
+Useful commands:
+
+```bash
+docker compose logs -f          # follow the app log (processing progress, errors)
+docker compose restart          # apply app code or config.ini changes
+docker compose down             # stop; data in ./data is kept
+docker build -t barcode-mgr . && docker compose up -d   # after changing requirements.txt or the Dockerfile
+```
 
 ## Running without Docker
 
