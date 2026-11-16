@@ -130,6 +130,10 @@ def init_db():
             db.execute("ALTER TABLE batches ADD COLUMN pages_done INTEGER DEFAULT 0")
 
 
+def _json_body():
+    return request.get_json(silent=True) or {}
+
+
 # ---------------------------------------------------------------------------
 # Image processing
 # ---------------------------------------------------------------------------
@@ -398,6 +402,11 @@ def process_batch(batch_id, save_path):
     log.info("Batch %s: processing complete (%d pages)", batch_id, page_count)
 
 
+@app.errorhandler(413)
+def too_large(_e):
+    return jsonify(error="File is too large (max 50 MB)"), 413
+
+
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
     f = request.files.get("file")
@@ -483,9 +492,11 @@ def api_barcode_image(bc_id):
 
 @app.route("/api/print", methods=["POST"])
 def api_print():
-    data = request.json
+    data = _json_body()
     batch_id = data.get("batch_id")
     bc_ids = data.get("barcode_ids", "all")
+    if bc_ids != "all" and not (isinstance(bc_ids, list) and all(isinstance(i, str) for i in bc_ids)):
+        return jsonify(error="barcode_ids must be \"all\" or a list of IDs"), 400
     with get_db() as db:
         if bc_ids == "all":
             rows = db.execute("SELECT * FROM barcodes WHERE batch_id=? AND decoded IS NOT NULL ORDER BY seq_num", (batch_id,)).fetchall()
@@ -521,9 +532,10 @@ def api_print_pdf(batch_id):
 
 @app.route("/api/scan", methods=["POST"])
 def api_scan():
-    data = request.json
+    data = _json_body()
     batch_id = data.get("batch_id")
-    scanned = _sanitize(data.get("decoded_string", "").strip())
+    raw = data.get("decoded_string")
+    scanned = _sanitize(raw.strip()) if isinstance(raw, str) else ""
     if not scanned:
         return jsonify(error="Empty scan"), 400
     with get_db() as db:
@@ -564,7 +576,7 @@ def api_reconcile(batch_id):
 
 @app.route("/api/reprint", methods=["POST"])
 def api_reprint():
-    batch_id = request.json.get("batch_id")
+    batch_id = _json_body().get("batch_id")
     reprint_batch_dir = TO_REPRINT_DIR / batch_id
     if reprint_batch_dir.exists():
         shutil.rmtree(reprint_batch_dir, ignore_errors=True)
@@ -868,6 +880,7 @@ var TRANSLATIONS = {
     delete_confirm: "Delete batch and all its data?",
     btn_view: "View", btn_complete: "Complete", btn_delete: "Delete",
     err_not_found: "Barcode not found in this batch",
+    err_network: "Server not reachable — try again",
   },
   ru: {
     title_a: "Станция печати", title_b: "Станция сканирования",
@@ -900,6 +913,7 @@ var TRANSLATIONS = {
     delete_confirm: "Удалить партию и все данные?",
     btn_view: "Показать партию", btn_complete: "Отметить завершенной", btn_delete: "Удалить партию",
     err_not_found: "Штрихкод не найден в этой партии",
+    err_network: "Сервер недоступен — повторите",
   }
 };
 
@@ -1005,11 +1019,11 @@ function pollUploadProgress(batchId) {
     uploadPollTimer = setInterval(function() {
         fetch("/api/upload_progress/" + encodeURIComponent(batchId)).then(function(r) { return r.json(); }).then(function(d) {
             setUploadProgress(d.pages_done, d.total_pages);
-            if (d.status === "processed" || d.status === "error") {
+            if (d.status === "processed" || d.status === "error" || d.error) {
                 clearInterval(uploadPollTimer);
                 uploadPollTimer = null;
                 document.getElementById("btnUpload").disabled = false;
-                if (d.status === "error") {
+                if (d.status !== "processed") {
                     document.getElementById("upload-status").innerHTML =
                         '<div class="flash flash-err">' + escHtml(t("upload_failed")) + '</div>';
                 } else {
@@ -1034,17 +1048,17 @@ function upload() {
     document.getElementById("upload-progress-wrap").style.display = "block";
     setUploadProgress(0, 0);
     document.getElementById("btnUpload").disabled = true;
+    function fail(msg) {
+        document.getElementById("upload-status").innerHTML = '<div class="flash flash-err">' + escHtml(msg) + '</div>';
+        document.getElementById("upload-progress-wrap").style.display = "none";
+        document.getElementById("btnUpload").disabled = false;
+    }
     fetch("/api/upload", {method: "POST", body: fd}).then(function(r) {
         return r.json();
     }).then(function(d) {
-        if (d.error) {
-            document.getElementById("upload-status").innerHTML = '<div class="flash flash-err">' + d.error + '</div>';
-            document.getElementById("upload-progress-wrap").style.display = "none";
-            document.getElementById("btnUpload").disabled = false;
-            return;
-        }
+        if (d.error) { fail(d.error); return; }
         pollUploadProgress(d.batch_id);
-    });
+    }).catch(function() { fail(t("err_network")); });
 }
 
 function loadBatches() {
@@ -1241,7 +1255,7 @@ function submitScan() {
     }).then(function(r) { return r.json(); }).then(function(d) {
         var time = new Date().toLocaleTimeString();
         var cls = d.status === "ok" ? "flash-ok" : "flash-err";
-        var errMsg = d.status === "unknown" ? t("err_not_found") : d.message;
+        var errMsg = d.status === "unknown" ? t("err_not_found") : (d.message || d.error);
         var msg = d.status === "ok" ? ("OK " + time + " - " + val.slice(0, 40)) : ("WARN " + time + " - " + errMsg);
         scanLog.unshift('<div class="flash ' + cls + '">' + escHtml(msg) + "</div>");
         document.getElementById("scan-log").innerHTML = scanLog.join("");
@@ -1257,6 +1271,11 @@ function submitScan() {
             // Batch drops out of the list; keep batchId so stats stay visible.
             loadBatchList();
         }
+    }).catch(function() {
+        // Keep the scanned value in the field so it can be resubmitted.
+        var msg = "WARN " + new Date().toLocaleTimeString() + " - " + t("err_network");
+        document.getElementById("scan-feedback").innerHTML = '<div class="flash flash-err">' + escHtml(msg) + "</div>";
+        inp.focus();
     });
 }
 
