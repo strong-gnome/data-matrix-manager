@@ -54,8 +54,9 @@ PRINT_PAPER_SIZE_MM    = float(_s.get("print_paper_size_mm",    25))
 SEQ_NUM_GAP_MM = float(_s.get("seq_num_gap_mm", 2.0))
 
 _p = _cfg["processing"] if "processing" in _cfg else {}
-# Pages rendered and searched at the same time. Each page in progress holds
-# its 400 DPI image (~50 MB for A4), so keep this modest under mem_limit.
+# Pages rendered and searched at the same time. Each worker uses about one
+# CPU core, and peak memory grows with the count (measured figures in the
+# README), so keep this within the container's mem_limit.
 PROCESS_WORKERS = max(1, min(int(_p.get("workers", 4)), os.cpu_count() or 1))
 
 DATA_DIR.mkdir(exist_ok=True)

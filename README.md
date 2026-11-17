@@ -38,7 +38,7 @@ Both pages have an English/Russian switch and a dark mode.
 ```
 
 - **Resolution.** Codes are not upscaled one by one. Each PDF page is rasterised at 400 DPI as a whole, and every code is cropped from that image with a small margin. So the stored PNGs, and the labels printed from them, are 400 DPI crops of the vector source.
-- **Processing runs in the background.** Uploads return right away. Four pages are rendered and decoded at the same time (`workers` in `config.ini`). Results are still saved in page order, memory depends on the number of workers rather than the PDF size, and the printer station shows a progress bar while this runs.
+- **Processing runs in the background.** Uploads return right away. Four pages are rendered and decoded at the same time (`workers` in `config.ini`). Results are still saved in page order, memory depends on the number of workers rather than the PDF size, and the printer station shows a progress bar while this runs. Each worker keeps about one CPU core busy while a file is processing, and nothing runs when no file is processing. As a reference point, a 96-page A4 file with 4 codes per page takes about 5.5 minutes with 1 worker, 1.5 minutes with 4, and 50 seconds with 8 (which needs more memory, see [Configuration](#configuration)).
 - **Detection.** First, each whole page goes to libdmtx, which finds the codes itself, up to 25 per page. To keep this fast, libdmtx searches the page at 1/2 size, and only if that finds nothing does it search at full size. The codes are always cropped from the full 400 DPI image, so the search size doesn't affect label quality. If libdmtx finds nothing at all on a page, the app falls back to an OpenCV contour search. That search takes out table lines, keeps roughly square shapes, and sizes its filters from the median shape on that page, not from fixed limits.
 - **Duplicate check.** When processing finishes, the app looks for codes that appear more than once in the batch, or that already exist in another batch, including completed ones. Honest Sign codes must be unique per product, so the printer station then shows an orange warning on the upload result and in the batch list, naming the other batches. This is a warning only: the batch can still be printed, so check it before printing. A code that appears twice in one batch can still be scanned twice, once for each copy.
 - **Cleaning the decoded text.** GS (`\x1D`) separators and other control characters are removed, and repeated spaces are merged into one. This happens to the decoded values and to scanner input, so the two match when compared. Many handheld scanners drop or change the GS characters in Honest Sign codes, which is why both sides are cleaned. This only affects matching. The printed label uses the cropped image of the original code, not a re-encoded one, so the GS separators and the crypto tail stay intact on the label.
@@ -129,8 +129,20 @@ print_paper_size_mm    = 25   # side of the square label / PDF page
 seq_num_gap_mm         = 1.5  # gap between the code and the sequence number under it
 
 [processing]
-workers = 4                   # PDF pages processed at the same time (~50 MB each for A4)
+workers = 4                   # PDF pages processed at the same time
 ```
+
+`workers` sets how many pages are processed in parallel. Each worker uses about one CPU core. Measured on a 96-page A4 PDF with 4 codes on each page (384 codes in total):
+
+| `workers` | Peak memory | Processing time |
+|-----------|-------------|-----------------|
+| 1         | ~410 MB     | ~5.5 min        |
+| 2         | ~570 MB     | ~2.9 min        |
+| 4         | ~690 MB     | ~1.5 min        |
+| 6         | ~1010 MB    | ~65 s           |
+| 8         | ~1190 MB    | ~50 s           |
+
+Every setting decoded all 384 codes. With the compose file's `mem_limit: 1000m`, keep `workers` at 4 or lower: 6 already goes over the limit. For 6 or 8, raise `mem_limit` and `memswap_limit` to at least 1500m. If the limit is too low, the container is killed while processing a large file, it restarts, and the batch ends up as `error`. Set `workers` to 1 to process one page at a time.
 
 The code is centred on the label. The batch sequence number is printed under it in bold, with the font size scaled to `seq_num_gap_mm`. Restart the app after you change the config.
 
